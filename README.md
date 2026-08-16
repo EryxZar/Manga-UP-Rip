@@ -34,7 +34,7 @@ Por lo tanto, el programa utiliza un sistema de **UUID**. Solo necesitas iniciar
 **Opción B: Desde el código fuente**
 1. Clona este repositorio: `https://github.com/EryxZar/Manga-UP-Rip.git`
 2. Instala las dependencias: `pip install requests blackboxprotobuf customtkinter`
-3. Ejecuta el script: `python main.py` (o el nombre que le hayas dado al archivo).
+3. Ejecuta el script: `python Manga-UP!-Rip.py` (o el nombre que le hayas dado al archivo).
 
 ### 🔑 ¿Cómo obtener tu UUID?
 Para usar el programa necesitas tu UUID personal:
@@ -77,7 +77,7 @@ Therefore, the program uses a **UUID** system. You only need to log in ONCE on t
 **Option B: From source code**
 1. Clone this repository: `https://github.com/EryxZar/Manga-UP-Rip.git`
 2. Install the dependencies: `pip install requests blackboxprotobuf customtkinter`
-3. Run the script: `python main.py` (or whatever you named the file).
+3. Run the script: `python Manga-UP!-Rip.py` (or whatever you named the file).
 
 ### 🔑 How to get your UUID?
 To use the program, you need your personal UUID:
