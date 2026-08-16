@@ -1,62 +1,3 @@
-"""
-Manga UP! Downloader - GUI
-Author: EryxZar
-
-El login por OAuth de Square Enix no se puede replicar de forma confiable desde
-un script de escritorio: el flujo real pasa por Play Integrity API de Google
-(attestation atada al dispositivo Android), que no se puede falsificar desde
-Python. Por eso el programa no intenta loguearse solo.
-
-En su lugar: el usuario se loguea UNA VEZ en la app real de Manga UP! (con un
-proxy tipo mitmproxy/HTTP Toolkit) y pega aquí el uuid que queda vinculado a su
-cuenta (aparece en cualquier petición a la API después del login exitoso, ej:
-".../start?...&uuid=XXXXXXXX-...", ".../my_page?...&uuid=XXXXXXXX-..."). Ese
-uuid se guarda en config.json y se reusa en todas las peticiones de lectura.
-
-Cambios de esta versión:
-  - Se agregó la descarga real de imágenes (antes era un TODO). Se portó la
-    lógica ya probada del script de consola: chapter_read_confirm -> se
-    determina el método de lectura (gratis / ticket / coin) -> viewer/read
-    devuelve las URLs de página -> se descargan con el header de imagen
-    (Dalvik UA) que usa la app real.
-  - Se agregó un panel de billetera (estilo Webtoon) que muestra Coin,
-    Ticket naranja (común, sirve en cualquier serie con opción de ticket
-    verde) y Ticket azul (de título/serie específico, campo "65" según lo
-    reportado por el usuario).
-  - NOTA sobre los índices de campo de "my_page" (billetera): estos números
-    se dedujeron por prueba y error contra respuestas reales. Si el número
-    de ticket azul no coincide con lo que ves en la app, revisa el log de
-    depuración (se imprime el nodo completo cada vez que se actualiza la
-    billetera) y ajusta el índice en extraer_billetera().
-  - Los capítulos que solo se pueden desbloquear viendo un anuncio (video
-    reward) todavía no están soportados en la GUI -> se saltan con un aviso;
-    para esos, usa la versión de consola (que sí permite inyectar el token
-    capturado manualmente).
-  - Etiquetas de capítulo simplificadas: ya no se distingue en la lista si un
-    capítulo de pago se desbloquea con ticket bonus/título/común o con coin;
-    todos muestran "TICKET/COIN-N" donde N es el costo en coin del capítulo.
-  - NUEVO: clasificación de la lista SIN llamadas de red por capítulo.
-    chapter_list (la misma respuesta que ya usamos para sacar id/título) ya
-    trae el costo real ("4", el mismo campo que antes solo veíamos dentro de
-    chapter_read_confirm) y un campo "22" que, por los casos observados,
-    parece indicar el estado de desbloqueo:
-        - sin "4" (ausente)            -> gratis (proto3 omite costo=0)
-        - "4" presente y "22"==2       -> de pago, ticket ya usable ahora
-        - "4" presente y "22"==1       -> de pago, ticket aún NO disponible
-                                          (a veces viene "17" con la fecha,
-                                          ej. "8月14日にチケットが使えます")
-        - "4" presente y "22" con otro valor / ausente -> de pago genérico
-    Esto es SOLO para la etiqueta que se muestra en la lista -> es una pista
-    rápida, no una fuente 100% confirmada (se dedujo de pocos casos). La
-    descarga real SIEMPRE vuelve a confirmar con chapter_read_confirm justo
-    antes de bajar cada capítulo, así que aunque la etiqueta se equivoque en
-    algún caso raro, la descarga en sí sigue siendo correcta.
-    Con esto, chapter_read_confirm ya NO se llama para toda la lista -> solo
-    se llama una vez (al primer capítulo de pago que haya) para leer el
-    estado de recarga del ticket bonus (dato global de la cuenta, no por
-    capítulo), y después una vez por cada capítulo que el usuario realmente
-    decide descargar.
-"""
 from __future__ import annotations
 import json
 import os
@@ -195,17 +136,13 @@ IMG_USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 9; SM-G9880 Build/PQ3A.190705.
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-
-# ------------------------------------------------------------------
-# Cliente de la API de Manga UP!
-# ------------------------------------------------------------------
 class MangaUpApi:
     def __init__(self):
         self.base_url = "https://ja-android.manga-up.com/v2/api"
         self.secret = "ccb203a682ba10f07c286873dab0452a"
         self.app_ver = "8110001"
         self.os_ver = "28"
-        self.uuid = None  # se setea desde la GUI con el uuid pegado por el usuario
+        self.uuid = None
 
     def _headers(self):
         return {
@@ -285,7 +222,6 @@ class MangaUpApi:
             print(f"[DEBUG] Error decodificando protobuf: {e}")
             return None
 
-    # -- Endpoints ------------------------------------------------------
     def obtener_lista_capitulos(self, title_id):
         raw_bytes = self.hacer_peticion("chapter_list", "chapter_list", extra_params={"title_id": title_id})
         if raw_bytes:
@@ -338,10 +274,6 @@ class MangaUpApi:
             time.sleep(0.5)
         return False
 
-
-# ------------------------------------------------------------------
-# Parseo de respuestas protobuf
-# ------------------------------------------------------------------
 def extraer_capitulos(data):
     try:
         capitulos_raw = data.get("1", {}).get("48", {}).get("1", [])
@@ -547,10 +479,6 @@ def guardar_config(config):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
-
-# ------------------------------------------------------------------
-# GUI
-# ------------------------------------------------------------------
 class PrintRedirector:
     def __init__(self, textbox, root, log_path):
         self.textbox = textbox
@@ -702,7 +630,6 @@ class MangaUpDownloaderApp(ctk.CTk):
         self.progress_label = ctk.CTkLabel(self.log_frame, text="", font=("Arial", 12, "bold"), anchor="w")
         self.progress_label.pack(fill="x", padx=5, pady=(5, 0))
 
-        # NUEVO: Etiqueta dedicada al progreso de descarga de páginas en línea.
         self.page_progress_label = ctk.CTkLabel(self.log_frame, text="", font=("Arial", 12), anchor="w", text_color="#4da6ff")
         self.page_progress_label.pack(fill="x", padx=5, pady=(0, 0))
 
@@ -815,7 +742,6 @@ class MangaUpDownloaderApp(ctk.CTk):
     def _set_progress_async(self, text):
         self.after(0, lambda: self._set_progress(text))
 
-    # NUEVO: Lógica para actualizar el progreso por página (1/62) en línea
     def _set_page_progress(self, text):
         self.page_progress_label.configure(text=text)
 
@@ -991,7 +917,6 @@ class MangaUpDownloaderApp(ctk.CTk):
         print(self.t("dl_pages_found", len(urls)))
         ok = 0
         
-        # NUEVO: Bucle de descarga con actualización del progreso de página
         for i, url in enumerate(urls, 1):
             self._set_page_progress_async(f"  {i}/{len(urls)}")
             
