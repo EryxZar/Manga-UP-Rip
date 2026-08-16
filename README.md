@@ -22,7 +22,7 @@ Por lo tanto, el programa utiliza un sistema de **UUID**. Solo necesitas iniciar
 - **Descargas en Alta Calidad:** Extrae y descarga directamente las imágenes `.webp` simulando el cliente de Android.
 - **Rango de Selección:** Selecciona múltiples capítulos fácilmente (ej: `1-5, 8, 10`).
 
-*(Nota: Los capítulos que requieren ver un anuncio / "Video Reward" actualmente no se pueden descargar desde el programa tiene usted que entrar a la app y ver el Ads.*
+*(Nota: Los capítulos que requieren ver un anuncio / "Video Reward" actualmente no se pueden descargar desde el programa tiene usted que entrar a la app y ver el Ads.)*
 
 ### 🚀 Instalación y Uso
 
