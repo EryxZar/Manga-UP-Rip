@@ -136,6 +136,10 @@ IMG_USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 9; SM-G9880 Build/PQ3A.190705.
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
+
+# ------------------------------------------------------------------
+# Cliente de la API de Manga UP!
+# ------------------------------------------------------------------
 class MangaUpApi:
     def __init__(self):
         self.base_url = "https://ja-android.manga-up.com/v2/api"
@@ -222,6 +226,7 @@ class MangaUpApi:
             print(f"[DEBUG] Error decodificando protobuf: {e}")
             return None
 
+    # -- Endpoints ------------------------------------------------------
     def obtener_lista_capitulos(self, title_id):
         raw_bytes = self.hacer_peticion("chapter_list", "chapter_list", extra_params={"title_id": title_id})
         if raw_bytes:
@@ -274,14 +279,28 @@ class MangaUpApi:
             time.sleep(0.5)
         return False
 
+
+# ------------------------------------------------------------------
+# Parseo de respuestas protobuf
+# ------------------------------------------------------------------
 def extraer_capitulos(data):
     try:
         capitulos_raw = data.get("1", {}).get("48", {}).get("1", [])
         capitulos = []
         for cap in capitulos_raw:
+            titulo_bruto = cap.get("2")
+            numero_cap = cap.get("3")
+
+            if numero_cap and titulo_bruto:
+                titulo_final = f"{numero_cap} {titulo_bruto}"
+            elif titulo_bruto:
+                titulo_final = titulo_bruto
+            else:
+                titulo_final = f"Cap. {len(capitulos) + 1}"
+
             capitulos.append({
                 "id": cap.get("1"),
-                "title": cap.get("2"),
+                "title": titulo_final,
                 "costo_coin": cap.get("4"),
                 "tipo_desbloqueo": cap.get("22"),
                 "ticket_fecha": cap.get("17", ""),
@@ -317,23 +336,28 @@ def determinar_metodo_lectura(confirm_data):
     if not costo_coin:
         return "free_chapter", {}, "(gratis / ya desbloqueado)", {}
 
-    recarga_texto = nodo_58.get("2", {}).get("3", "")
+    recarga_texto = str(nodo_58.get("2", {}).get("3", ""))
+    texto_info = str(nodo_58.get("13", ""))
     opcion = nodo_58.get("9")
     texto = ""
     ad_disponible = False
 
     if isinstance(opcion, dict):
-        texto = opcion.get("2", "")
+        texto = str(opcion.get("2", ""))
     elif isinstance(opcion, list):
         opciones_txt = []
         for o in opcion:
             if not isinstance(o, dict):
                 continue
-            texto_o = o.get("2", "")
+            texto_o = str(o.get("2", ""))
             opciones_txt.append(texto_o)
             if o.get("1") == 4 or "広告動画" in texto_o:
                 ad_disponible = True
         texto = f"(sin fondos suficientes: {', '.join(opciones_txt)})"
+
+    # Determinar la "naturaleza" del capítulo para la API
+    is_ticket_chapter = "チケット" in texto_info or "チケット" in texto
+    base_status = "ticket_chapter" if is_ticket_chapter else "coin_chapter"
 
     if "ボーナスチケット" in texto:
         disponible = ("チャージ完了" in recarga_texto) or not recarga_texto
@@ -342,19 +366,20 @@ def determinar_metodo_lectura(confirm_data):
             "costo_coin": costo_coin,
             "bonus_disponible": disponible,
             "bonus_recarga_texto": recarga_texto,
+            "base_status": base_status
         }
-        return "ticket_chapter", {"bonus_ticket": 1}, f"{texto} ({estado})", info
+        return base_status, {"bonus_ticket": 1}, f"{texto} ({estado})", info
 
     if "作品チケット" in texto:
-        return "ticket_chapter", {"title_ticket": 1}, texto, {"costo_coin": costo_coin}
+        return base_status, {"title_ticket": 1}, texto, {"costo_coin": costo_coin, "base_status": base_status}
     if "共通チケット" in texto:
-        return "ticket_chapter", {"common_ticket": 1}, texto, {"costo_coin": costo_coin}
+        return base_status, {"common_ticket": 1}, texto, {"costo_coin": costo_coin, "base_status": base_status}
 
     extra = {"limited_free_coin": costo_coin}
     if ad_disponible:
         extra["ad_disponible"] = True
 
-    return "coin_chapter", extra, texto or "コインで読む", {"costo_coin": costo_coin}
+    return base_status, extra, texto or "コインで読む", {"costo_coin": costo_coin, "base_status": base_status}
 
 
 def etiquetar(chapter_status, costo_coin):
@@ -398,7 +423,7 @@ def obtener_estado_bonus_ticket(api, capitulos):
         return {}
     confirm_data = api.obtener_confirmacion_lectura(primer_pago["id"])
     nodo_58 = confirm_data.get("1", {}).get("58", {}) if confirm_data else {}
-    recarga_texto = nodo_58.get("2", {}).get("3", "")
+    recarga_texto = str(nodo_58.get("2", {}).get("3", ""))
     disponible = ("チャージ完了" in recarga_texto) or not recarga_texto
     return {"disponible": disponible, "texto": recarga_texto}
 
@@ -479,6 +504,10 @@ def guardar_config(config):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
+
+# ------------------------------------------------------------------
+# GUI
+# ------------------------------------------------------------------
 class PrintRedirector:
     def __init__(self, textbox, root, log_path):
         self.textbox = textbox
@@ -900,6 +929,17 @@ class MangaUpDownloaderApp(ctk.CTk):
         data = self.api.obtener_paginas_capitulo(capitulo["id"], chapter_status, extra_params)
         urls = extraer_paginas(data) if data else []
 
+        # --- NUEVO BLOQUE DE FALLBACK ---
+        is_trying_ticket = "bonus_ticket" in extra_params or "title_ticket" in extra_params or "common_ticket" in extra_params
+        if not urls and is_trying_ticket and info and info.get("costo_coin"):
+            print(f"  [DEBUG] Falló el uso de ticket. Forzando fallback a monedas ({info['costo_coin']})...")
+            fallback_params = {"limited_free_coin": info["costo_coin"]}
+            fallback_status = info.get("base_status", chapter_status)
+
+            data = self.api.obtener_paginas_capitulo(capitulo["id"], fallback_status, fallback_params)
+            urls = extraer_paginas(data) if data else []
+        # --------------------------------
+
         if not urls and chapter_status != "free_chapter":
             confirm_data2 = self.api.obtener_confirmacion_lectura(capitulo["id"])
             chapter_status2, extra_params2, _texto2, _info2 = determinar_metodo_lectura(confirm_data2)
@@ -927,7 +967,7 @@ class MangaUpDownloaderApp(ctk.CTk):
             if self.api.descargar_imagen(url, destino):
                 ok += 1
 
-        self._set_page_progress_async("") # Limpiamos el texto al finalizar el capítulo
+        self._set_page_progress_async("")
 
         if ok == len(urls):
             print(self.t("dl_chapter_ok", ok, len(urls)))
