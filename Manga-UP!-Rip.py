@@ -242,7 +242,9 @@ class MangaUpApi:
     def obtener_paginas_capitulo(self, chapter_id, chapter_status="free_chapter", extra_params=None):
         params = {"chapter_id": chapter_id, "chapter_status": chapter_status}
         if extra_params:
-            params.update(extra_params)
+            # Filtramos flags internos como ad_disponible para no enviarlos en la URL
+            clean_extra = {k: v for k, v in extra_params.items() if k != "ad_disponible"}
+            params.update(clean_extra)
         raw_bytes = self.hacer_peticion("viewer/read", "viewer/read", extra_params=params)
         if not raw_bytes:
             return None
@@ -286,6 +288,8 @@ class MangaUpApi:
 def extraer_capitulos(data):
     try:
         capitulos_raw = data.get("1", {}).get("48", {}).get("1", [])
+        if isinstance(capitulos_raw, dict):
+            capitulos_raw = [capitulos_raw]
         capitulos = []
         for cap in capitulos_raw:
             titulo_bruto = cap.get("2")
@@ -316,6 +320,8 @@ def extraer_capitulos(data):
 def extraer_paginas(data):
     try:
         items = data.get("1", {}).get("15", {}).get("1", {}).get("1", [])
+        if isinstance(items, dict):
+            items = [items]
         urls = []
         for item in items:
             pagina = item.get("1")
@@ -329,57 +335,138 @@ def extraer_paginas(data):
         return []
 
 
-def determinar_metodo_lectura(confirm_data):
-    nodo_58 = confirm_data.get("1", {}).get("58", {}) if confirm_data else {}
-    costo_coin = nodo_58.get("1", {}).get("4")
+def _to_int(val, default=0):
+    try:
+        return int(val) if val is not None else default
+    except (ValueError, TypeError):
+        return default
 
+
+def construir_params_monedas(costo_coin, paid_coin=0, free_coin=0, limited_free_coin=0):
+    """
+    Reparte el costo del capítulo consumiendo primero monedas gratuitas/misiones (free_coin)
+    y cubriendo el resto con monedas compradas (coin), enviando solo los parámetros > 0.
+    """
+    costo_coin = _to_int(costo_coin, 0)
+    paid_coin = _to_int(paid_coin, 0)
+    free_coin = _to_int(free_coin, 0)
+    limited_free_coin = _to_int(limited_free_coin, 0)
+
+    restante = costo_coin
+    params = {}
+
+    usar_limited = min(restante, max(0, limited_free_coin))
+    restante -= usar_limited
+
+    usar_free = min(restante, max(0, free_coin))
+    restante -= usar_free
+
+    usar_paid = min(restante, max(0, paid_coin))
+    restante -= usar_paid
+
+    if restante == 0:
+        if usar_paid > 0:
+            params["coin"] = usar_paid
+        if usar_free > 0:
+            params["free_coin"] = usar_free
+        if usar_limited > 0:
+            params["limited_free_coin"] = usar_limited
+        return params
+
+    # Fallback si el saldo leído parece menor al costo
+    if free_coin > 0 and paid_coin > 0:
+        params["coin"] = costo_coin - usar_free
+        params["free_coin"] = usar_free
+    elif paid_coin > 0:
+        params["coin"] = costo_coin
+    elif free_coin > 0:
+        params["free_coin"] = costo_coin
+    else:
+        params["limited_free_coin"] = costo_coin
+
+    return params
+
+
+def determinar_metodo_lectura(confirm_data):
+    if not confirm_data:
+        return "free_chapter", {}, "(gratis / ya desbloqueado)", {}
+
+    nodo_58 = confirm_data.get("1", {}).get("58", {})
+    nodo_8 = confirm_data.get("8", {})
+    if not isinstance(nodo_8, dict):
+        nodo_8 = {}
+
+    costo_coin = nodo_58.get("1", {}).get("4") if isinstance(nodo_58.get("1"), dict) else None
     if not costo_coin:
         return "free_chapter", {}, "(gratis / ya desbloqueado)", {}
 
-    recarga_texto = str(nodo_58.get("2", {}).get("3", ""))
-    texto_info = str(nodo_58.get("13", ""))
+    # Saldos de monedas del usuario:
+    # Campo 6 (o root 8.5) = Monedas compradas (coin)
+    # Campo 7 (o root 8.4) = Monedas gratis/misiones (free_coin)
+    # Campo 8              = Monedas temporales/bonus (limited_free_coin, si existe)
+    paid_coin = nodo_58.get("6") if nodo_58.get("6") is not None else nodo_8.get("5", 0)
+    free_coin = nodo_58.get("7") if nodo_58.get("7") is not None else nodo_8.get("4", 0)
+    limited_free_coin = nodo_58.get("8", 0)
+
+    paid_coin = _to_int(paid_coin, 0)
+    free_coin = _to_int(free_coin, 0)
+    limited_free_coin = _to_int(limited_free_coin, 0)
+
+    recarga_texto = nodo_58.get("2", {}).get("3", "") if isinstance(nodo_58.get("2"), dict) else ""
+    texto_info = str(nodo_58.get("13", "") or "")
     opcion = nodo_58.get("9")
     texto = ""
     ad_disponible = False
 
     if isinstance(opcion, dict):
-        texto = str(opcion.get("2", ""))
+        texto = str(opcion.get("2", "") or "")
+        if opcion.get("1") == 4 or "広告動画" in texto:
+            ad_disponible = True
     elif isinstance(opcion, list):
         opciones_txt = []
         for o in opcion:
             if not isinstance(o, dict):
                 continue
-            texto_o = str(o.get("2", ""))
+            texto_o = str(o.get("2", "") or "")
             opciones_txt.append(texto_o)
             if o.get("1") == 4 or "広告動画" in texto_o:
                 ad_disponible = True
         texto = f"(sin fondos suficientes: {', '.join(opciones_txt)})"
 
-    # Determinar la "naturaleza" del capítulo para la API
-    is_ticket_chapter = "チケット" in texto_info or "チケット" in texto
+    # Si el capítulo admite tickets, su naturaleza en la API es 'ticket_chapter' aunque se pague con monedas
+    is_ticket_chapter = ("チケット" in texto_info) or ("チケット" in texto)
     base_status = "ticket_chapter" if is_ticket_chapter else "coin_chapter"
+
+    common_info = {
+        "costo_coin": costo_coin,
+        "paid_coin": paid_coin,
+        "free_coin": free_coin,
+        "limited_free_coin": limited_free_coin,
+        "ad_disponible": ad_disponible,
+        "base_status": base_status,
+    }
 
     if "ボーナスチケット" in texto:
         disponible = ("チャージ完了" in recarga_texto) or not recarga_texto
         estado = "disponible ahora" if disponible else f"recarga en {recarga_texto}"
         info = {
-            "costo_coin": costo_coin,
+            **common_info,
             "bonus_disponible": disponible,
             "bonus_recarga_texto": recarga_texto,
-            "base_status": base_status
         }
         return base_status, {"bonus_ticket": 1}, f"{texto} ({estado})", info
 
     if "作品チケット" in texto:
-        return base_status, {"title_ticket": 1}, texto, {"costo_coin": costo_coin, "base_status": base_status}
+        return base_status, {"title_ticket": 1}, texto, common_info
     if "共通チケット" in texto:
-        return base_status, {"common_ticket": 1}, texto, {"costo_coin": costo_coin, "base_status": base_status}
+        return base_status, {"common_ticket": 1}, texto, common_info
 
-    extra = {"limited_free_coin": costo_coin}
+    # Desglose automático entre monedas gratis/misiones (free_coin) y compradas (coin)
+    extra = construir_params_monedas(costo_coin, paid_coin, free_coin, limited_free_coin)
     if ad_disponible:
         extra["ad_disponible"] = True
 
-    return base_status, extra, texto or "コインで読む", {"costo_coin": costo_coin, "base_status": base_status}
+    return base_status, extra, texto or "コインで読む", common_info
 
 
 def etiquetar(chapter_status, costo_coin):
@@ -423,7 +510,7 @@ def obtener_estado_bonus_ticket(api, capitulos):
         return {}
     confirm_data = api.obtener_confirmacion_lectura(primer_pago["id"])
     nodo_58 = confirm_data.get("1", {}).get("58", {}) if confirm_data else {}
-    recarga_texto = str(nodo_58.get("2", {}).get("3", ""))
+    recarga_texto = nodo_58.get("2", {}).get("3", "") if isinstance(nodo_58.get("2"), dict) else ""
     disponible = ("チャージ完了" in recarga_texto) or not recarga_texto
     return {"disponible": disponible, "texto": recarga_texto}
 
@@ -431,13 +518,29 @@ def obtener_estado_bonus_ticket(api, capitulos):
 def extraer_billetera(data):
     try:
         nodo = data.get("1", {}).get("56", {})
-        ticket_info = nodo.get("6", {})
+        if not isinstance(nodo, dict):
+            nodo = {}
+        nodo_8 = data.get("8", {})
+        if not isinstance(nodo_8, dict):
+            nodo_8 = {}
+
+        ticket_info = nodo.get("6") if isinstance(nodo.get("6"), dict) else nodo_8.get("1", {})
+        if not isinstance(ticket_info, dict):
+            ticket_info = {}
+
+        paid_coin = _to_int(nodo_8.get("5"), 0)
+        free_coin = _to_int(nodo_8.get("4"), 0)
+        nodo_coin = _to_int(nodo.get("1"), 0)
+        total_coin = (paid_coin + free_coin) or nodo_coin
+
         return {
-            "coin": nodo.get("1", 0),
-            "ticket_naranja_actual": ticket_info.get("1", 0),
-            "ticket_naranja_max": ticket_info.get("2", 0),
+            "coin": total_coin,
+            "paid_coin": paid_coin,
+            "free_coin": free_coin,
+            "ticket_naranja_actual": _to_int(ticket_info.get("1"), 0),
+            "ticket_naranja_max": _to_int(ticket_info.get("2"), 0),
             "ticket_naranja_recarga": ticket_info.get("3", ""),
-            "ticket_azul": nodo.get("7", 0),
+            "ticket_azul": _to_int(nodo.get("7") if nodo.get("7") is not None else nodo_8.get("3"), 0),
             "raw": nodo,
         }
     except Exception as e:
@@ -462,6 +565,8 @@ def extraer_tickets_regalo(data):
         items = data.get("8", {}).get("2")
         if items is None:
             items = data.get("1", {}).get("8", {}).get("2", [])
+        if isinstance(items, dict):
+            items = [items]
         regalos = []
         for item in items:
             if not isinstance(item, dict):
@@ -738,7 +843,14 @@ class MangaUpDownloaderApp(ctk.CTk):
             self.ticket_azul_count = None
             self._render_azul_label()
             return
-        self.coin_label.configure(text=f"🪙 {billetera['coin']}")
+
+        paid = billetera.get("paid_coin", 0)
+        free = billetera.get("free_coin", 0)
+        if paid or free:
+            self.coin_label.configure(text=f"🪙 {billetera['coin']} (💳{paid} / 🎁{free})")
+        else:
+            self.coin_label.configure(text=f"🪙 {billetera['coin']}")
+
         self.naranja_label.configure(text=f"🟠 {billetera['ticket_naranja_actual']}/{billetera['ticket_naranja_max']}")
         self.ticket_azul_count = billetera['ticket_azul']
         self._render_azul_label()
@@ -929,23 +1041,37 @@ class MangaUpDownloaderApp(ctk.CTk):
         data = self.api.obtener_paginas_capitulo(capitulo["id"], chapter_status, extra_params)
         urls = extraer_paginas(data) if data else []
 
-        # --- NUEVO BLOQUE DE FALLBACK ---
-        is_trying_ticket = "bonus_ticket" in extra_params or "title_ticket" in extra_params or "common_ticket" in extra_params
-        if not urls and is_trying_ticket and info and info.get("costo_coin"):
-            print(f"  [DEBUG] Falló el uso de ticket. Forzando fallback a monedas ({info['costo_coin']})...")
-            fallback_params = {"limited_free_coin": info["costo_coin"]}
+        # Fallback 1: Si falló el uso de ticket, forzar compra con monedas (compradas + gratis)
+        is_trying_ticket = any(k in extra_params for k in ("bonus_ticket", "title_ticket", "common_ticket"))
+        costo_coin = info.get("costo_coin")
+        if not urls and is_trying_ticket and costo_coin:
+            print(f"[DEBUG] Falló el uso de ticket para cap {capitulo['id']}. Forzando fallback a monedas ({costo_coin})...")
+            fallback_params = construir_params_monedas(
+                costo_coin,
+                info.get("paid_coin", 0),
+                info.get("free_coin", 0),
+                info.get("limited_free_coin", 0),
+            )
             fallback_status = info.get("base_status", chapter_status)
-
             data = self.api.obtener_paginas_capitulo(capitulo["id"], fallback_status, fallback_params)
             urls = extraer_paginas(data) if data else []
-        # --------------------------------
 
+        # Fallback 2: Re-consultar chapter_read_confirm por si cambió el estado o saldo
         if not urls and chapter_status != "free_chapter":
             confirm_data2 = self.api.obtener_confirmacion_lectura(capitulo["id"])
             chapter_status2, extra_params2, _texto2, _info2 = determinar_metodo_lectura(confirm_data2)
             if (chapter_status2, extra_params2) != (chapter_status, extra_params):
                 data = self.api.obtener_paginas_capitulo(capitulo["id"], chapter_status2, extra_params2)
                 urls = extraer_paginas(data) if data else []
+
+        # Fallback 3: Probar variantes puras (solo coin, solo free_coin, solo limited_free_coin)
+        if not urls and costo_coin:
+            fallback_status = info.get("base_status", chapter_status)
+            for cand in ({"coin": costo_coin}, {"free_coin": costo_coin}, {"limited_free_coin": costo_coin}):
+                data = self.api.obtener_paginas_capitulo(capitulo["id"], fallback_status, cand)
+                urls = extraer_paginas(data) if data else []
+                if urls:
+                    break
 
         if not urls:
             print(self.t("no_pages"))
@@ -956,10 +1082,10 @@ class MangaUpDownloaderApp(ctk.CTk):
 
         print(self.t("dl_pages_found", len(urls)))
         ok = 0
-        
+
         for i, url in enumerate(urls, 1):
             self._set_page_progress_async(f"  {i}/{len(urls)}")
-            
+
             destino = os.path.join(carpeta_capitulo, f"{i:03d}.webp")
             if os.path.exists(destino):
                 ok += 1
